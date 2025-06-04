@@ -13,23 +13,34 @@
         <maven.compiler.target>23</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <java.version>23</java.version>
-    </properties>
+        <junit.jupiter.version>5.11.0-M1</junit.jupiter.version> </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <version>3.5.0</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
 
     <build>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version> </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-assembly-plugin</artifactId>
                 <configuration>
-                    <finalName>codecrafters-http-server</finalName> <!-- Please do not change this final artifact name-->
-                    <descriptorRefs>
-                        <descriptorRef>jar-with-dependencies</descriptorRef>
-                    </descriptorRefs>
+                    <finalName>codecrafters-http-server</finalName> <descriptorRefs>
+                    <descriptorRef>jar-with-dependencies</descriptorRef>
+                </descriptorRefs>
                     <appendAssemblyId>false</appendAssemblyId>
                     <archive>
                         <manifest>
                             <addClasspath>true</addClasspath>
-                            <!-- This is the main class of your program which will be executed-->
                             <mainClass>Main</mainClass>
                         </manifest>
                     </archive>
