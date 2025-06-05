@@ -6,24 +6,36 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import exceptions.BadRequestException;
 
 public class Main {
+    private static String filesDirectory;
+
     public static void main(String[] args) {
         System.out.println("Logs from your program will appear here!");
 
-        try (ServerSocket serverSocket = new ServerSocket(4221)) {
+        getFileDirectory(args);
+
+        // Using try-with-resources for serverSocket and executorService ensures they are closed
+        try (ServerSocket serverSocket = new ServerSocket(4221);
+             ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor()
+        ) {
             serverSocket.setReuseAddress(true);
             System.out.println("Server listening on port 4221. Waiting for connections...");
 
             while (true) {
                 try {
-                    Socket clientSocket = serverSocket.accept();
+                    final Socket clientSocket = serverSocket.accept();
                     System.out.println("\nAccepted new connection from client: " + clientSocket.getInetAddress());
-                    handleConnection(clientSocket);
+                    executorService.submit(() -> handleConnection(clientSocket));
                 } catch (IOException e) {
                     System.out.println("Error accepting client connection: " + e.getMessage());
                 }
@@ -31,6 +43,16 @@ public class Main {
 
         } catch (IOException e) {
             System.out.println("Server socket error: " + e.getMessage());
+        }
+    }
+
+    private static void getFileDirectory(String[] args) {
+        for (int i = 0; i < args.length; i++) {
+            if ("--directory".equals(args[i]) && i + 1 < args.length) {
+                filesDirectory = args[i + 1];
+                System.out.println("Serving files from directory: " + filesDirectory);
+                break;
+            }
         }
     }
 
@@ -53,9 +75,9 @@ public class Main {
         }
 
         try (OutputStream outputStream = clientSocket.getOutputStream()) {
-            String response = "HTTP/1.1 400 Bad Request\r\nContent-Length: " + message.length() + "\r\n\r\n" + message;
-            outputStream.write(response.getBytes(StandardCharsets.UTF_8));
-            outputStream.flush();
+            String headers = "HTTP/1.1 400 Bad Request\r\nContent-Length: " + message.length() + "\r\n\r\n";
+            Response errorResponse = new Response(headers, message.getBytes(StandardCharsets.UTF_8));
+            sendResponseToClient(outputStream, errorResponse);
         } catch (IOException e) {
             System.err.println("Error sending 400 response: " + e.getMessage());
         }
@@ -76,53 +98,96 @@ public class Main {
              OutputStream outputStream = socket.getOutputStream()) {
 
             String requestPath = getRequestPath(reader);
-
             Map<String, String> headers = getHeaders(reader);
 
-            // --- Determine the appropriate HTTP response based on the request path ---
-            String response = switch (requestPath) {
-                case "/" -> {
-                    System.out.println("Path is '/', sending 200 OK (simple).");
-                    yield "HTTP/1.1 200 OK\r\n\r\n";
-                }
-                case String p when p.startsWith("/echo/") -> {
-                    String echoString = p.substring("/echo/".length());
-                    byte[] responseBodyBytes = echoString.getBytes(StandardCharsets.UTF_8);
-                    int contentLength = responseBodyBytes.length;
-
-                    System.out.println("Path is /echo/, echoing: '" + echoString + "', sending 200 OK with body.");
-                    yield STR."""
-                        HTTP/1.1 200 OK\r
-                        Content-Type: text/plain\r
-                        Content-Length: \{contentLength}\r
-                        \r
-                        \{echoString}""";
-                }
-                case "/user-agent" -> {
-                    String userAgent = headers.getOrDefault("user-agent", "");
-                    byte[] responseBodyBytes = userAgent.getBytes(StandardCharsets.UTF_8);
-                    int contentLength = responseBodyBytes.length;
-
-                    System.out.println("Path is /user-agent, User-Agent: '" + userAgent + "', sending 200 OK with body.");
-                    yield STR."""
-                        HTTP/1.1 200 OK\r
-                        Content-Type: text/plain\r
-                        Content-Length: \{contentLength}\r
-                        \r
-                        \{userAgent}""";
-                }
-                default -> {
-                    System.out.println("Path is '" + requestPath + "', sending 404 Not Found.");
-                    yield "HTTP/1.1 404 Not Found\r\n\r\n";
-                }
+            Response response = switch (requestPath) {
+                case "/" -> processDefaultPath();
+                case String p when
+                    p.startsWith("/echo/") -> processEchoPath(p);
+                case "/user-agent" -> processUserAgentPath(headers);
+                case String p when
+                    p.startsWith("/files/") -> processFilePath(p);
+                default -> process404(requestPath);
             };
 
-            // Send the constructed response back to the client
-            outputStream.write(response.getBytes(StandardCharsets.UTF_8));
-            outputStream.flush();
-            System.out.println("Response sent.");
-
+            sendResponseToClient(outputStream, response);
         }
+    }
+
+    private static void sendResponseToClient(OutputStream outputStream, Response response) throws IOException {
+        outputStream.write(response.headers().getBytes(StandardCharsets.UTF_8));
+        if (response.body() != null) {
+            outputStream.write(response.body());
+        }
+        outputStream.flush();
+        System.out.println("Response sent.");
+    }
+
+    private static Response processDefaultPath() {
+        System.out.println("Path is '/', sending 200 OK (simple).");
+        return new Response("HTTP/1.1 200 OK\r\n\r\n", null);
+    }
+
+    private static Response processEchoPath(String p) {
+        String echoString = p.substring("/echo/".length());
+        byte[] responseBodyBytes = echoString.getBytes(StandardCharsets.UTF_8);
+        int contentLength = responseBodyBytes.length;
+
+        System.out.println("Path is /echo/, echoing: '" + echoString + "', sending 200 OK with body.");
+        String headers = STR."""
+            HTTP/1.1 200 OK\r
+            Content-Type: text/plain\r
+            Content-Length: \{contentLength}\r
+            \r
+            """;
+        return new Response(headers, responseBodyBytes);
+    }
+
+    private static Response processUserAgentPath(Map<String, String> headers) {
+        String userAgent = headers.getOrDefault("user-agent", "");
+        byte[] responseBodyBytes = userAgent.getBytes(StandardCharsets.UTF_8);
+        int contentLength = responseBodyBytes.length;
+
+        System.out.println("Path is /user-agent, User-Agent: '" + userAgent + "', sending 200 OK with body.");
+        String responseHeaders = STR."""
+            HTTP/1.1 200 OK\r
+            Content-Type: text/plain\r
+            Content-Length: \{contentLength}\r
+            \r
+            """;
+        return new Response(responseHeaders, responseBodyBytes);
+    }
+
+    private static Response processFilePath(String p) throws IOException {
+        if (filesDirectory == null) {
+            System.err.println("Error: --directory was not specified, cannot serve files.");
+            return new Response("HTTP/1.1 500 Internal Server Error\r\n\r\n", null);
+        }
+
+        String filename = p.substring("/files/".length());
+        filename = java.net.URLDecoder.decode(filename, StandardCharsets.UTF_8)
+            .replace("../", ""); // prevent directory traversal attacks
+        Path filePath = Paths.get(filesDirectory, filename);
+
+        if (Files.exists(filePath) && Files.isRegularFile(filePath)) {
+            byte[] fileBytes = Files.readAllBytes(filePath);
+            String headers = STR."""
+                HTTP/1.1 200 OK\r
+                Content-Type: application/octet-stream\r
+                Content-Length: \{fileBytes.length}\r
+                \r
+                """;
+            System.out.println(STR."Served file: \{filename}, size: \{fileBytes.length} bytes.");
+            return new Response(headers, fileBytes);
+        } else {
+            System.out.println("File not found or not accessible: " + filename);
+            return process404(p);
+        }
+    }
+
+    private static Response process404(String requestPath) {
+        System.out.println("Path is '" + requestPath + "', sending 404 Not Found.");
+        return new Response("HTTP/1.1 404 Not Found\r\n\r\n", null);
     }
 
     private static String getRequestPath(BufferedReader reader) throws IOException {
@@ -158,12 +223,13 @@ public class Main {
                 String headerValue = headerLine.substring(colonIndex + 1).trim();
                 headers.put(headerName, headerValue);
             } else {
-                // Malformed header line (e.g., "invalid header without colon")
                 System.out.println("Malformed header line: " + headerLine);
-                // For now, just ignore malformed single header lines
             }
         }
         System.out.println("Finished reading headers. Parsed headers: " + headers);
         return headers;
+    }
+
+    private record Response(String headers, byte[] body) {
     }
 }

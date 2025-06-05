@@ -6,21 +6,30 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.StructuredTaskScope;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
+import org.springframework.util.FileSystemUtils;
 
 @DisplayName("HTTP Server Stages Tests")
 class MainTest {
 
     private static final int PORT = 4221;
     private static ExecutorService executor;
+    private static Path tempDirectory;
+    private static final String TEMP_DIR_NAME = "http-server-test-files";
 
     /**
      * Helper method to send an HTTP request to the server and read its full response.
@@ -39,6 +48,7 @@ class MainTest {
             // Send the request
             out.write(request.getBytes(StandardCharsets.UTF_8));
             out.flush();
+            clientSocket.shutdownOutput();
 
             String line;
             int contentLength = -1;
@@ -74,28 +84,8 @@ class MainTest {
         return responseBuilder.toString();
     }
 
-    @BeforeAll
-    static void setup() throws InterruptedException {
-        // Start the Main server in a new thread before any tests run
-        executor = Executors.newVirtualThreadPerTaskExecutor();
-        executor.submit(() -> Main.main(new String[] {})); // Run the server's main method
-
-        // Give the server a brief moment to start up and bind to the port
-        TimeUnit.MILLISECONDS.sleep(500); // Adjust this delay if tests are flaky
-        System.out.println("Server started in background for tests.");
-    }
-
-    @AfterAll
-    static void tearDown() {
-        // Shut down the server thread after all tests are done
-        if (executor != null) {
-            executor.shutdownNow(); // Attempt to stop the server gracefully
-            System.out.println("Server thread shut down.");
-        }
-    }
-
     @Nested
-    @DisplayName("Stage 2 & 3 Tests: Basic Routing (Root and Unknown Paths)")
+    @DisplayName("Stage 1 Tests: Basic Routing (Root and Unknown Paths)")
     class BasicRoutingTests {
 
         @Test
@@ -146,7 +136,7 @@ class MainTest {
     }
 
     @Nested
-    @DisplayName("Stage 4 Tests: /echo/{str} Endpoint Functionality")
+    @DisplayName("Stage 2 Tests: /echo/{str} Endpoint Functionality")
     class EchoEndpointTests {
 
         @Test
@@ -250,7 +240,7 @@ class MainTest {
     }
 
     @Nested
-    @DisplayName("Stage 5 Tests: /user-agent Endpoint Functionality")
+    @DisplayName("Stage 3 Tests: /user-agent Endpoint Functionality")
     class UserAgentEndpointTests {
 
         @Test
@@ -362,4 +352,177 @@ class MainTest {
             assertEquals(expectedResponse, actualResponse, "Server should parse 'USER-AGENT' header correctly.");
         }
     }
+
+    @Nested
+    @DisplayName("Stage 4 Tests: Concurrency & Malformed Requests")
+    class ConcurrencyAndMalformedTests {
+
+        // This test simulates the exact scenario you described with nc
+        @Test
+        @DisplayName("Should handle multiple concurrent GET / requests correctly (nc-like scenario - Structured Concurrency)")
+        void testSpecificConcurrentGetRootRequests() throws Exception {
+            final int numberOfConcurrentClients = 10; // Simulating 10 concurrent connections
+            final String request = STR."""
+                GET / HTTP/1.1\r
+                Host: localhost:\{PORT}\r
+                \r
+                """;
+            final String expectedResponse = "HTTP/1.1 200 OK\r\n\r\n";
+
+            try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                for (int i = 0; i < numberOfConcurrentClients; i++) {
+                    final int clientId = i;
+                    scope.fork(() -> {
+                        System.out.println(STR."Client \{clientId}: Sending GET / request.");
+                        String actualResponse = sendHttpRequest(request);
+                        System.out.println(STR."Client \{clientId}: Received response. Verifying...");
+                        assertEquals(expectedResponse, actualResponse, STR."Client \{clientId} failed: Incorrect response for GET /");
+                        return STR."Client \{clientId} successful.";
+                    });
+                }
+                scope.join();
+                scope.throwIfFailed();
+            }
+
+            System.out.println(STR."Successfully processed \{numberOfConcurrentClients} concurrent GET / requests using Structured Concurrency.");
+        }
+    }
+
+    @Nested
+    @DisplayName("Stage 5 Tests: /files/{filename} Endpoint Functionality")
+    class FileEndpointTests {
+        @AfterAll
+        static void cleanupFiles() throws IOException {
+            FileSystemUtils.deleteRecursively(tempDirectory);
+            System.out.println("Temporary files cleaned up from: " + tempDirectory.toAbsolutePath());
+        }
+
+        @Test
+        @DisplayName("Should return 200 OK with file content for an existing file")
+        void testExistingFile() throws IOException {
+            String filename = "test_file_1.txt";
+            String fileContent = "This is a test file content.";
+            Path filePath = tempDirectory.resolve(filename);
+            Files.writeString(filePath, fileContent); // Create the file
+
+            String request = STR."""
+                GET /files/\{filename} HTTP/1.1\r
+                Host: localhost:\{PORT}\r
+                \r
+                """;
+
+            byte[] contentBytes = fileContent.getBytes(StandardCharsets.UTF_8);
+            String expectedResponseHeaders = STR."""
+                HTTP/1.1 200 OK\r
+                Content-Type: application/octet-stream\r
+                Content-Length: \{contentBytes.length}\r
+                \r
+                """;
+            String expectedResponse = expectedResponseHeaders + fileContent; // Combine headers and body
+
+            String actualResponse = sendHttpRequest(request);
+            assertEquals(expectedResponse, actualResponse, "Server should return 200 OK with correct file content.");
+        }
+
+        @Test
+        @DisplayName("Should return 404 Not Found for a non-existent file")
+        void testNonExistentFile() throws IOException {
+            String filename = "non_existent_file.xyz"; // This file should not exist
+            String request = STR."""
+                GET /files/\{filename} HTTP/1.1\r
+                Host: localhost:\{PORT}\r
+                \r
+                """;
+
+            String expectedResponse = "HTTP/1.1 404 Not Found\r\n\r\n";
+            String actualResponse = sendHttpRequest(request);
+            assertEquals(expectedResponse, actualResponse, "Server should return 404 Not Found for non-existent files.");
+        }
+
+        @Test
+        @DisplayName("Should return 200 OK for an empty file")
+        void testEmptyFile() throws IOException {
+            String filename = "empty.txt";
+            String fileContent = "";
+            Path filePath = tempDirectory.resolve(filename);
+            Files.writeString(filePath, fileContent); // Create an empty file
+
+            String request = STR."""
+                GET /files/\{filename} HTTP/1.1\r
+                Host: localhost:\{PORT}\r
+                \r
+                """;
+
+            byte[] contentBytes = fileContent.getBytes(StandardCharsets.UTF_8); // length will be 0
+            String expectedResponseHeaders = STR."""
+                HTTP/1.1 200 OK\r
+                Content-Type: application/octet-stream\r
+                Content-Length: \{contentBytes.length}\r
+                \r
+                """;
+            String expectedResponse = expectedResponseHeaders + fileContent;
+
+            String actualResponse = sendHttpRequest(request);
+            assertEquals(expectedResponse, actualResponse, "Server should return 200 OK with empty content for an empty file.");
+        }
+
+        @Test
+        @DisplayName("Should handle file names with special characters (URL-encoded)")
+        void testFileWithSpecialCharacters() throws IOException {
+            String originalFilename = "file with spaces & symbols!.txt";
+            String urlEncodedFilename = originalFilename
+                .replace(" ", "%20")
+                .replace("&", "%26")
+                .replace("!", "%21");
+            String fileContent = "Content for special file.";
+            Path filePath = tempDirectory.resolve(originalFilename); // Create file with actual name
+            Files.writeString(filePath, fileContent);
+
+            String request = STR."""
+                GET /files/\{urlEncodedFilename} HTTP/1.1\r
+                Host: localhost:\{PORT}\r
+                \r
+                """;
+
+            byte[] contentBytes = fileContent.getBytes(StandardCharsets.UTF_8);
+            String expectedResponseHeaders = STR."""
+                HTTP/1.1 200 OK\r
+                Content-Type: application/octet-stream\r
+                Content-Length: \{contentBytes.length}\r
+                \r
+                """;
+            String expectedResponse = expectedResponseHeaders + fileContent;
+
+            String actualResponse = sendHttpRequest(request);
+            assertEquals(expectedResponse, actualResponse, "Server should handle URL-encoded filenames.");
+        }
+    }
+
+    @BeforeAll
+    static void setup() throws InterruptedException, IOException {
+        Path desiredTempDirectory = Paths.get(System.getProperty("java.io.tmpdir"), TEMP_DIR_NAME);
+        if (Files.exists(desiredTempDirectory)) {
+            tempDirectory = desiredTempDirectory;
+            System.out.println("Using existing temporary directory: " + tempDirectory.toAbsolutePath());
+        } else {
+            tempDirectory = Files.createDirectories(desiredTempDirectory);
+            System.out.println("Created new temporary directory: " + tempDirectory.toAbsolutePath());
+        }
+
+        executor = Executors.newVirtualThreadPerTaskExecutor();
+        // Pass the --directory argument to the Main.main method
+        executor.submit(() -> Main.main(new String[] {"--directory", tempDirectory.toAbsolutePath().toString()}));
+        TimeUnit.MILLISECONDS.sleep(500); // Give server time to restart and pick up new arg
+        System.out.println("Server restarted with --directory flag.");
+    }
+
+    @AfterAll
+    static void tearDown(){
+        // Shut down the server thread after all tests are done
+        if (executor != null) {
+            executor.shutdownNow(); // Attempt to stop the server gracefully
+            System.out.println("Server thread shut down.");
+        }
+    }
+
 }
