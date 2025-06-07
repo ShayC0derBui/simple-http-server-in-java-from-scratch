@@ -1,4 +1,5 @@
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -13,7 +14,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.StructuredTaskScope;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Stream;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -27,9 +27,9 @@ import org.springframework.util.FileSystemUtils;
 class MainTest {
 
     private static final int PORT = 4221;
+    private static final String TEMP_DIR_NAME = "http-server-test-files";
     private static ExecutorService executor;
     private static Path tempDirectory;
-    private static final String TEMP_DIR_NAME = "http-server-test-files";
 
     /**
      * Helper method to send an HTTP request to the server and read its full response.
@@ -391,6 +391,8 @@ class MainTest {
     @Nested
     @DisplayName("Stage 5 Tests: /files/{filename} Endpoint Functionality")
     class FileEndpointTests {
+
+
         @AfterAll
         static void cleanupFiles() throws IOException {
             FileSystemUtils.deleteRecursively(tempDirectory);
@@ -496,7 +498,120 @@ class MainTest {
             String actualResponse = sendHttpRequest(request);
             assertEquals(expectedResponse, actualResponse, "Server should handle URL-encoded filenames.");
         }
+
+        @Test
+        @Order(1) // Ensure this runs before any GET tests that might expect the file
+        @DisplayName("Should create a new file with POST /files/{filename} and return 201 Created")
+        void testPostFile_CreatesNewFile() throws IOException {
+            String filename = "post_test_file.txt";
+            String fileContent = "This is content created by a POST request.";
+            Path filePath = tempDirectory.resolve(filename);
+
+            // Ensure file does not exist before the test
+            Files.deleteIfExists(filePath);
+
+            String request = STR."""
+                POST /files/\{filename} HTTP/1.1\r
+                Host: localhost:\{PORT}\r
+                Content-Type: application/octet-stream\r
+                Content-Length: \{fileContent.getBytes(StandardCharsets.UTF_8).length}\r
+                \r
+                \{fileContent}""";
+
+            String expectedResponse = "HTTP/1.1 201 Created\r\n\r\n"; // No body expected for 201
+
+            String actualResponse = sendHttpRequest(request);
+            assertEquals(expectedResponse, actualResponse, "Server should return 201 Created for file creation.");
+
+            // Verify the file was actually created and contains the correct content
+            // Give a small moment for file system write to complete if async
+            try {
+                TimeUnit.MILLISECONDS.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+
+            // Assertion 1: File exists
+            assertTrue(Files.exists(filePath), "File should be created by POST request.");
+            assertTrue(Files.isRegularFile(filePath), "Created path should be a regular file.");
+
+            // Assertion 2: File content is correct
+            String actualFileContent = Files.readString(filePath, StandardCharsets.UTF_8);
+            assertEquals(fileContent, actualFileContent, "Content of the created file should match the request body.");
+        }
+
+        @Test
+        @Order(2) // Run after creation, verifies overwrite behavior or just content
+        @DisplayName("Should overwrite an existing file with POST /files/{filename} and return 201 Created")
+        void testPostFile_OverwritesExistingFile() throws IOException {
+            String filename = "overwrite_test_file.txt";
+            String initialContent = "Original content.";
+            String newContent = "This new content should overwrite the old one.";
+            Path filePath = tempDirectory.resolve(filename);
+
+            // Create initial file
+            Files.writeString(filePath, initialContent);
+            System.out.println(STR."Initial file '\{filename}' created with content: '\{initialContent}'");
+
+
+            String request = STR."""
+                POST /files/\{filename} HTTP/1.1\r
+                Host: localhost:\{PORT}\r
+                Content-Type: application/octet-stream\r
+                Content-Length: \{newContent.getBytes(StandardCharsets.UTF_8).length}\r
+                \r
+                \{newContent}""";
+
+            String expectedResponse = "HTTP/1.1 201 Created\r\n\r\n";
+
+            String actualResponse = sendHttpRequest(request);
+            assertEquals(expectedResponse, actualResponse, "Server should return 201 Created for overwriting a file.");
+
+            // Verify the file was overwritten and contains the new content
+            try {
+                TimeUnit.MILLISECONDS.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+
+            assertTrue(Files.exists(filePath), "Overwritten file should still exist.");
+            String actualFileContent = Files.readString(filePath, StandardCharsets.UTF_8);
+            assertEquals(newContent, actualFileContent, "Content of the overwritten file should match the new request body.");
+        }
+
+        @Test
+        @Order(3)
+        @DisplayName("Should create an empty file with POST /files/{filename} for an empty body")
+        void testPostFile_EmptyBody() throws IOException {
+            String filename = "empty_post_file.txt";
+            Path filePath = tempDirectory.resolve(filename);
+
+            Files.deleteIfExists(filePath); // Ensure clean slate
+
+            String request = STR."""
+                POST /files/\{filename} HTTP/1.1\r
+                Host: localhost:\{PORT}\r
+                Content-Type: application/octet-stream\r
+                Content-Length: 0\r
+                \r
+                """; // Empty body, Content-Length: 0
+
+            String expectedResponse = "HTTP/1.1 201 Created\r\n\r\n";
+
+            String actualResponse = sendHttpRequest(request);
+            assertEquals(expectedResponse, actualResponse, "Server should return 201 Created for creating an empty file.");
+
+            try {
+                TimeUnit.MILLISECONDS.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+
+            assertTrue(Files.exists(filePath), "Empty file should be created by POST request.");
+            assertEquals(0, Files.size(filePath), "Created file should be empty.");
+        }
     }
+
 
     @BeforeAll
     static void setup() throws InterruptedException, IOException {
@@ -517,7 +632,7 @@ class MainTest {
     }
 
     @AfterAll
-    static void tearDown(){
+    static void tearDown() {
         // Shut down the server thread after all tests are done
         if (executor != null) {
             executor.shutdownNow(); // Attempt to stop the server gracefully
