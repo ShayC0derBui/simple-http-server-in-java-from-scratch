@@ -20,6 +20,15 @@ public enum HttpStatus {
         return message;
     }
 
+    public static HttpStatus fromCodeAndMessage(int code, String message) {
+        for (HttpStatus status : HttpStatus.values()) {
+            if (status.getCode() == code && status.getMessage().equalsIgnoreCase(message)) {
+                return status;
+            }
+        }
+        return null;
+    }
+
     HttpStatus(int code, String message) {
         this.code = code;
         this.message = message;

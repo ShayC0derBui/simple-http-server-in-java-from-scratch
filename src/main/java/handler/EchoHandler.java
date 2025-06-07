@@ -1,6 +1,7 @@
 package handler;
 
 
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 
 import request.HttpRequest;
@@ -13,7 +14,7 @@ public class EchoHandler implements RouteHandler {
     @Override
     public HttpResponse handle(HttpRequest request) {
         String path = request.getPath();
-        String echoString = path.substring("/echo/".length());
+        String echoString = URLDecoder.decode(path.substring("/echo/".length()), StandardCharsets.UTF_8);
         byte[] responseBodyBytes = echoString.getBytes(StandardCharsets.UTF_8);
 
         System.out.println(STR."Handling /echo/, echoing: '\{echoString}'");

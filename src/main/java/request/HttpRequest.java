@@ -1,14 +1,18 @@
 package request;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 public class HttpRequest {
     private final String method;
     private final String path;
     private final String httpVersion;
-    private final Map<String, String> headers;
+    private Map<String, String> headers;
     private final byte[] body;
     private Map<String, String> pathParameters;
 
@@ -16,21 +20,29 @@ public class HttpRequest {
         this.method = method;
         this.path = path;
         this.httpVersion = httpVersion;
-        this.headers = Map.copyOf(headers);
-        this.body = body != null ? body.clone() : null;
+        this.headers = new LinkedHashMap<>(headers);
+        this.body = body != null ? body.clone() : new byte[0];
+        if (this.body.length > 0) {
+            this.headers.put("Content-length", String.valueOf(this.body.length));
+        }
         this.pathParameters = Collections.emptyMap();
     }
+    public HttpRequest(String method, String path, String httpVersion, Map<String, String> headers) {
+        this.method = method;
+        this.path = path;
+        this.httpVersion = httpVersion;
+        this.headers = Map.copyOf(headers);
+        this.body = new byte[0];
+        this.pathParameters = Collections.emptyMap();
+    }
+
 
     public Optional<String> getPathParameter(String name) {
         return Optional.ofNullable(pathParameters.get(name));
     }
 
     public Map<String, String> getPathParameters() {
-        return pathParameters;
-    }
-
-    public void setPathParameters(Map<String, String> pathParameters) {
-        this.pathParameters = Map.copyOf(pathParameters);
+        return Collections.unmodifiableMap(pathParameters); // Return unmodifiable view
     }
 
     public String getMethod() {
@@ -50,26 +62,90 @@ public class HttpRequest {
     }
 
     public Map<String, String> getHeaders() {
-        return headers;
+        return Collections.unmodifiableMap(headers);
     }
 
     public Optional<byte[]> getBody() {
-        return Optional.ofNullable(body != null ? body.clone() : null);
+        return Optional.of(body.clone());
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(method, path, httpVersion, headers, Arrays.hashCode(body), pathParameters);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        HttpRequest that = (HttpRequest) o;
+
+        // Compare basic request line components
+        if (!Objects.equals(method, that.method)) {
+            return false;
+        }
+        if (!Objects.equals(path, that.path)) {
+            return false;
+        }
+        if (!Objects.equals(httpVersion, that.httpVersion)) {
+            return false;
+        }
+
+        if (headers.size() != that.headers.size()) {
+            return false;
+        }
+        for (Map.Entry<String, String> entry : headers.entrySet()) {
+            String thisKey = entry.getKey();
+            String thisValue = entry.getValue();
+            String thatValue = that.headers.get(thisKey);
+            if (thatValue == null || !Objects.equals(thisValue, thatValue)) {
+                return false;
+            }
+        }
+
+        if (!Arrays.equals(body, that.body)) {
+            return false;
+        }
+
+        if (pathParameters.size() != that.pathParameters.size()) {
+            return false;
+        }
+        for (Map.Entry<String, String> entry : pathParameters.entrySet()) {
+            String thisKey = entry.getKey();
+            String thisValue = entry.getValue();
+            String thatValue = that.pathParameters.get(thisKey);
+            if (thatValue == null || !Objects.equals(thisValue, thatValue)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
-        sb.append("HttpRequest {\n");
-        sb.append("  Method: ").append(method).append("\n");
-        sb.append("  Path: ").append(path).append("\n");
-        sb.append("  HTTP Version: ").append(httpVersion).append("\n");
-        sb.append("  Headers: ").append(headers).append("\n");
-        sb.append("  Path Parameters: ").append(pathParameters).append("\n");
-        if (body != null) {
-            sb.append("  Body Length: ").append(body.length).append("\n");
+        sb.append(method).append(" ").append(path).append(" ").append(httpVersion).append("\r\n");
+
+        for (Map.Entry<String, String> entry : headers.entrySet()) {
+            sb.append(entry.getKey()).append(": ").append(entry.getValue()).append("\r\n");
         }
-        sb.append("}");
+        sb.append("\r\n");
+
+        if (body.length > 0) {
+            sb.append(new String(body, StandardCharsets.UTF_8));
+        }
         return sb.toString();
+    }
+
+    public void setPathParameters(Map<String, String> pathParams) {
+        if (pathParams == null || pathParams.isEmpty()) {
+            this.pathParameters = Collections.emptyMap();
+        } else {
+            this.pathParameters = Map.copyOf(pathParams);
+        }
     }
 }

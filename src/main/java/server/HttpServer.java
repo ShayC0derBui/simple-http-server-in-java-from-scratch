@@ -7,6 +7,7 @@ import java.net.Socket;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import middleware.ResponseCompressor;
 import router.Router;
 
 public class HttpServer {
@@ -14,11 +15,13 @@ public class HttpServer {
     private final Router router;
     private ServerSocket serverSocket;
     private ExecutorService executorService;
-    private volatile boolean running = true; // Use volatile for thread safety
+    private final ResponseCompressor responseCompressor;
+    private volatile boolean running = true;
 
     public HttpServer(int port, Router router) {
         this.port = port;
         this.router = router;
+        this.responseCompressor = new ResponseCompressor();
     }
 
     public void start() throws IOException {
@@ -33,22 +36,22 @@ public class HttpServer {
                 try {
                     final Socket clientSocket = serverSocket.accept();
                     System.out.println("\nAccepted new connection from client: " + clientSocket.getInetAddress());
-                    executorService.submit(new ClientHandler(clientSocket, router));
+                    executorService.submit(new ClientHandler(clientSocket, router, responseCompressor));
                 } catch (IOException e) {
-                    if (running) { // Only log if server is still supposed to be running
+                    if (running) {
                         System.err.println("Error accepting client connection: " + e.getMessage());
                     }
                 }
             }
         } finally {
-            stop(); // Ensure resources are cleaned up if loop exits
+            stop();
         }
     }
 
     public void stop() {
         running = false;
         if (executorService != null) {
-            executorService.shutdownNow(); // Attempt to stop all running tasks
+            executorService.shutdownNow();
             System.out.println("Shutting down connection handlers...");
         }
         if (serverSocket != null && !serverSocket.isClosed()) {

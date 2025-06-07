@@ -1,12 +1,15 @@
 package server;
 
+import java.io.BufferedInputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 
 import exceptions.BadRequestException;
+import middleware.ResponseCompressor;
 import request.HttpRequest;
 import request.RequestParser;
 import response.ContentType;
@@ -17,30 +20,70 @@ import router.Router;
 public class ClientHandler implements Runnable {
     private final Socket clientSocket;
     private final Router router;
+    private final ResponseCompressor responseCompressor;
 
-    public ClientHandler(Socket clientSocket, Router router) {
+    public ClientHandler(Socket clientSocket, Router router, ResponseCompressor responseCompressor) {
         this.clientSocket = clientSocket;
         this.router = router;
+        this.responseCompressor = responseCompressor;
     }
 
     @Override
     public void run() {
-        try (InputStream inputStream = clientSocket.getInputStream();
+        try {
+            clientSocket.setSoTimeout(500000); // e.g., 5 seconds of inactivity
+        } catch (IOException e) {
+            System.err.println("Error setting socket timeout: " + e.getMessage());
+            closeSocketQuietly(clientSocket); // Close if cannot set timeout
+            return;
+        }
+
+        try (BufferedInputStream bufferedInputStream = new BufferedInputStream(clientSocket.getInputStream()); // Use BufferedInputStream!
              OutputStream outputStream = clientSocket.getOutputStream()) {
 
-            HttpRequest request = RequestParser.parse(inputStream);
-            System.out.println(STR."Parsed Request: \{request.getMethod()} \{request.getPath()}");
+            while (true) {
+                HttpRequest request;
+                try {
+                    request = RequestParser.parse(bufferedInputStream);
+                    if (request == null) {
+                        System.out.println("Client gracefully closed connection or no more requests.");
+                        break;
+                    }
+                } catch (SocketTimeoutException e) {
+                    System.out.println("Client connection timed out (no new request received). Closing.");
+                    break;
+                } catch (BadRequestException e) {
+                    System.out.println(STR."Bad request received: \{e.getMessage()}");
+                    sendErrorResponse(clientSocket, HttpStatus.BAD_REQUEST, STR."400 Bad Request: \{e.getMessage()}");
+                    break;
+                }
 
-            HttpResponse response = router.handleRequest(request);
-            sendResponse(outputStream, response);
+                System.out.println(STR."Parsed Request: \{request.getMethod()} \{request.getPath()}");
 
-        } catch (BadRequestException e) {
-            System.out.println(STR."Bad request received: \{e.getMessage()}");
-            sendErrorResponse(clientSocket, HttpStatus.BAD_REQUEST, STR."400 Bad Request: \{e.getMessage()}");
+                HttpResponse response = router.handleRequest(request);
+
+                response = responseCompressor.compress(request, response);
+
+                Optional<String> connectionHeader = request.getHeader("connection");
+                boolean clientWantsToClose = connectionHeader.isPresent() && "close".equalsIgnoreCase(connectionHeader.get());
+
+                if (clientWantsToClose) {
+                    response.addHeader("Connection", "close");
+                }
+
+                sendResponse(outputStream, response);
+
+                if (clientWantsToClose || !clientSocket.isConnected() || clientSocket.isInputShutdown()) {
+                    System.out.println("Closing connection as requested by client or due to socket state.");
+                    break;
+                }
+            }
+
         } catch (IOException e) {
             System.err.println(STR."Error handling client connection: \{e.getMessage()}");
         } finally {
             closeSocketQuietly(clientSocket);
+            System.out.println("Server thread shut down for client: " + clientSocket.getInetAddress());
         }
     }
 
@@ -68,9 +111,7 @@ public class ClientHandler implements Runnable {
         if (socket != null && !socket.isClosed()) {
             try {
                 socket.close();
-                System.out.println("Client socket closed.");
             } catch (IOException ignore) {
-                // Ignore
             }
         }
     }
